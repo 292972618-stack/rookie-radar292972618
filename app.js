@@ -584,6 +584,69 @@ function renderNewsFeed(newsItems) {
   });
 }
 
+// ===== Live News → Player Matching (auto-matched from Worker feed) =====
+let LIVE_NEWS = [];
+
+const TEAM_STOPWORDS = new Set(['united', 'city', 'town', 'athletic', 'sporting', 'dynamo', 'olympic', 'olympique', 'county', 'forest']);
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Strip accents so "Cubarsí" matches "Cubarsi"
+function normalizeName(s) {
+  return (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+function sportSourcesFor(sport) {
+  return sport === 'basketball' ? ['ESPN NBA'] : ['ESPN Soccer', 'Sky Sports'];
+}
+
+function matchPlayerNews(p) {
+  if (!LIVE_NEWS || !LIVE_NEWS.length) return [];
+  const nameLower = normalizeName(p.name);
+  const parts = nameLower.split(' ').filter(Boolean);
+  const last = parts[parts.length - 1] || '';
+  const teamWords = normalizeName(p.team).split(' ').filter(w => w.length >= 5 && !TEAM_STOPWORDS.has(w));
+  const allowed = sportSourcesFor(p.sport);
+  const results = [];
+  for (const n of LIVE_NEWS) {
+    if (allowed.length && !allowed.includes(n.source)) continue;
+    const text = normalizeName((n.title || '') + ' ' + (n.description || ''));
+    let matchType = null;
+    if (nameLower.length > 3 && text.includes(nameLower)) {
+      matchType = 'exact';
+    } else if (last.length >= 4 && new RegExp('\\b' + escapeRegExp(last) + '\\b').test(text)) {
+      matchType = 'name';
+    } else if (teamWords.some(w => new RegExp('\\b' + escapeRegExp(w) + '\\b').test(text))) {
+      matchType = 'team';
+    }
+    if (matchType) results.push({ ...n, matchType });
+  }
+  const order = { exact: 0, name: 1, team: 2 };
+  results.sort((a, b) => (order[a.matchType] ?? 9) - (order[b.matchType] ?? 9));
+  return results;
+}
+
+function catZh(cat) {
+  return { transfer: '转会', injury: '伤病', performance: '表现', highlights: '集锦', general: '综合' }[cat] || '综合';
+}
+
+function fmtPubDate(d) {
+  if (!d) return '';
+  const t = new Date(d).getTime();
+  if (isNaN(t)) return d;
+  const diff = Date.now() - t;
+  if (diff < 0) return '刚刚';
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return '刚刚';
+  if (mins < 60) return mins + ' 分钟前';
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + ' 小时前';
+  const days = Math.floor(hrs / 24);
+  return days + ' 天前';
+}
+
 function generateMatchPriceTimeline(minutes, basePrices, sport) {
   const timeline = [];
   const points = sport === 'football' ? Math.ceil(minutes / 5) : Math.ceil(minutes / 3);
@@ -1167,10 +1230,44 @@ function renderOverviewChart(p) {
 }
 
 function renderNewsTab(p) {
+  const liveMatches = matchPlayerNews(p);
+  const liveSection = liveMatches.length ? `
+    <div class="live-news-header">
+      <span class="live-pulse"></span>
+      <span class="live-news-title">实时匹配 LIVE</span>
+      <span class="live-news-sub">${liveMatches.length} 条相关新闻 · 自动从 ESPN / Sky Sports 抓取</span>
+    </div>
+    ${liveMatches.slice(0, 8).map(n => `
+      <div class="intel-news-item live ${n.category}" data-url="${n.link || n.url || ''}">
+        <div class="intel-news-header">
+          <div class="intel-news-title">${n.title}</div>
+          ${n.impact ? `<span class="impact-badge ${n.impact}">${n.impact === 'high' ? '高影响 HIGH' : n.impact === 'medium' ? '中影响 MED' : '低影响 LOW'}</span>` : ''}
+        </div>
+        <div class="live-match-meta">
+          <span class="match-badge ${n.matchType}">${n.matchType === 'exact' ? '🎯 精确匹配' : n.matchType === 'name' ? '👤 姓名匹配' : '🏟️ 球队相关'}</span>
+          <span class="news-cat-badge">${catZh(n.category)}</span>
+        </div>
+        ${n.titleZh && currentLang !== 'en' ? `<div class="intel-news-zh">${n.titleZh}</div>` : ''}
+        ${n.description ? `<div class="live-news-desc">${n.description.substring(0, 160)}${n.description.length > 160 ? '…' : ''}</div>` : ''}
+        <div class="intel-news-footer">
+          <span class="news-source">📡 ${n.source} · ${n.sourceTier || 'T2'}</span>
+          <span>🕐 ${fmtPubDate(n.pubDate || n.time)}</span>
+          <span style="color:var(--green);font-weight:600;">✓ verified</span>
+        </div>
+      </div>`).join('')}
+  ` : `
+    <div class="live-news-header">
+      <span class="live-pulse"></span>
+      <span class="live-news-title">实时匹配 LIVE</span>
+      <span class="live-news-sub">暂无匹配该球员的最新新闻 · 每小时自动刷新</span>
+    </div>
+  `;
   return `
+    ${liveSection}
+    <div class="cached-news-divider">以下为人工整理情报 Curated Intel</div>
     <div class="ai-fetch-hint">
       <span>💡</span>
-      <span>这里展示的是该球员的情报聚合。实际使用中，可让我在对话中搜索外网最新消息并翻译更新。<strong>问我"搜一下 Yamal 最新消息"</strong>即可。</span>
+      <span>上方 LIVE 新闻由 Cloudflare Worker 从 ESPN / Sky Sports 自动抓取并按球员匹配；下方为人工核实情报。需要更深入的分析？<strong>问我"搜一下 Yamal 最新消息"</strong>即可。</span>
     </div>
     ${p.news.map(n => `
       <div class="intel-news-item ${n.type || 'general'}">
@@ -1439,8 +1536,23 @@ function init() {
   document.getElementById('playerModal').addEventListener('click', e => { if (e.target.id === 'playerModal') closeModal(); });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
   renderDashboard();
+  // Live news click → open source link (delegation on persistent modal element)
+  document.getElementById('playerModal').addEventListener('click', e => {
+    const item = e.target.closest('.intel-news-item.live');
+    if (item && item.dataset.url) window.open(item.dataset.url, '_blank');
+  });
   // Load news feed: try Worker API first, fall back to cached data
-  fetchLiveNews().then(news => renderNewsFeed(news));
+  fetchLiveNews().then(news => {
+    LIVE_NEWS = news;
+    renderNewsFeed(news);
+    const st = document.getElementById('newsFeedStatus');
+    if (st) { st.textContent = 'live'; st.classList.add('live'); }
+    // If a player modal is open on the news tab, refresh it with live matches
+    if (activePlayerId !== null && activeIntelTab === 'news') {
+      const p = PLAYERS.find(pl => pl.id === activePlayerId);
+      if (p) renderIntelTab(p, 'news');
+    }
+  });
 }
 
 // Expose for external data injection
